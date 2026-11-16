@@ -1,19 +1,29 @@
-// SISTEMA MULTIPLAYER P2P PARA GITHUB PAGES
+// SISTEMA MULTIPLAYER COM CÓDIGO DE 4 DÍGITOS
 let peer = null;
 let connections = [];
 let isHost = false;
 let myId = "";
-let remotePlayers = {}; // Guarda os outros jogadores
+let remotePlayers = {};
 
 function initNetwork() {
-    peer = new Peer(); // Gera ID automático gratuito
+    // Gera um número aleatório entre 1000 e 9999
+    const codigo4Digitos = Math.floor(1000 + Math.random() * 9000).toString();
+    
+    // Cria o servidor com o prefixo "doblox-" + os 4 dígitos
+    peer = new Peer("doblox-" + codigo4Digitos);
 
-    peer.on('open', (id) => {
-        myId = id;
-        document.getElementById("my-peer-id").innerText = id;
+    peer.on('open', () => {
+        myId = codigo4Digitos;
+        document.getElementById("my-peer-id").innerText = codigo4Digitos;
     });
 
-    // Quando alguém se liga a ti (se fores o Host)
+    // Se por acaso esse número já estiver a ser usado por outro jogador, tenta outro
+    peer.on('error', (err) => {
+        if (err.type === 'unavailable-id') {
+            initNetwork();
+        }
+    });
+
     peer.on('connection', (conn) => {
         setupConnection(conn);
     });
@@ -25,7 +35,6 @@ function setupConnection(conn) {
     conn.on('data', (data) => {
         if (data.type === 'move') {
             remotePlayers[data.id] = data.player;
-            // Se sou o Host, reencaminho para os outros todos
             if (isHost) {
                 broadcastData(data, conn.peer);
             }
@@ -46,11 +55,14 @@ function hostGame() {
 }
 
 function joinGame() {
-    const hostId = document.getElementById("join-id-input").value.trim();
-    if (!hostId) return alert("Mete o ID do teu amigo primeiro, ó esperto!");
+    const codeInput = document.getElementById("join-id-input").value.trim();
+    if (!/^\d{4}$/.test(codeInput)) {
+        return alert("Mete o código de 4 dígitos do teu amigo!");
+    }
     
     isHost = false;
-    const conn = peer.connect(hostId);
+    // Liga-se ao prefixo "doblox-" + os 4 dígitos que o teu amigo te deu
+    const conn = peer.connect("doblox-" + codeInput);
     conn.on('open', () => {
         setupConnection(conn);
         closeModal();
