@@ -1,0 +1,564 @@
+/**
+ * DOBLOX SERVER
+ * ------------------------------------------------------------
+ * Servidor multiplayer 2D feito em Node.js puro (sem dependências
+ * externas - não precisas de correr "npm install" para nada).
+ *
+ * Implementa à mão:
+ *   - servidor HTTP (serve os ficheiros do jogo)
+ *   - servidor WebSocket (para o multiplayer em tempo real)
+ *   - sistema de login simples (ficheiro users.json local)
+ *   - interpretador da linguagem própria "DobloxScript" (.dobx)
+ *   - dois modos de jogo originais:
+ *       "Sombra Entre Nós"      (inspirado em jogos de impostor)
+ *       "Portais Amaldiçoados"  (inspirado em jogos de portas)
+ *
+ * AVISO HONESTO: isto é um protótipo para ti e os teus amigos
+ * jogarem na mesma rede / através de um túnel (ex: ngrok). Não é
+ * um clone do Roblox nem tem segurança de nível profissional
+ * (as passwords são só "hash simples", não é bcrypt/argon2).
+ * ------------------------------------------------------------
+ */
+
+const http = require("http");
+const fs = require("fs");
+const path = require("path");
+const crypto = require("crypto");
+
+const PORT = process.env.PORT || 3000;
+const PUBLIC_DIR = path.join(__dirname, "public");
+const USERS_FILE = path.join(__dirname, "users.json");
+const MAP_FILE = path.join(__dirname, "world.dobx");
+
+// ============================================================
+// 1) "BASE DE DADOS" DE UTILIZADORES (ficheiro JSON local)
+// ============================================================
+
+function loadUsers() {
+  try {
+    return JSON.parse(fs.readFileSync(USERS_FILE, "utf8"));
+  } catch {
+    return {};
+  }
+}
+function saveUsers(users) {
+  fs.writeFileSync(USERS_FILE, JSON.stringify(users, null, 2));
+}
+function hashPassword(password, salt) {
+  return crypto.scryptSync(password, salt, 32).toString("hex");
+}
+function registerOrLogin(username, password) {
+  username = String(username || "").trim().slice(0, 16);
+  if (!username || !password) return { ok: false, error: "Preenche nome e password." };
+  if (!/^[a-zA-Z0-9_]+$/.test(username)) {
+    return { ok: false, error: "Usa só letras, números e _ no nome." };
+  }
+  const users = loadUsers();
+  const existing = users[username.toLowerCase()];
+  if (existing) {
+    const hash = hashPassword(password, existing.salt);
+    if (hash !== existing.hash) return { ok: false, error: "Password errada." };
+    return { ok: true, username: existing.displayName };
+  } else {
+    const salt = crypto.randomBytes(16).toString("hex");
+    const hash = hashPassword(password, salt);
+    users[username.toLowerCase()] = { displayName: username, salt, hash };
+    saveUsers(users);
+    return { ok: true, username, created: true };
+  }
+}
+
+// ============================================================
+// 2) INTERPRETADOR "DOBLOXSCRIPT" (.dobx)
+//    Uma linguagem de script própria, simples, baseada em linhas:
+//      comando chave=valor chave=valor ...
+//    Exemplos ficam no ficheiro world.dobx
+// ============================================================
+
+function parseDobloxScript(source) {
+  const lines = source.split("\n");
+  const doors = [];
+  const spawns = [];
+  const events = [];
+  let roomName = "Sala Sem Nome";
+
+  for (let raw of lines) {
+    const line = raw.trim();
+    if (!line || line.startsWith("#")) continue; // comentários
+    const parts = line.split(/\s+/);
+    const cmd = parts[0];
+    const args = {};
+    for (let i = 1; i < parts.length; i++) {
+      const [k, v] = parts[i].split("=");
+      if (k && v !== undefined) args[k] = v;
+    }
+    switch (cmd) {
+      case "room":
+        roomName = parts.slice(1).join(" ").replace(/^name=/, "");
+        break;
+      case "door": {
+        const [x, y] = (args.pos || "0,0").split(",").map(Number);
+        doors.push({
+          id: args.id || `D${doors.length + 1}`,
+          x, y,
+          trap: args.trap === "true",
+          chance: args.chance !== undefined ? parseFloat(args.chance) : 0.3,
+          label: args.label ? args.label.replace(/_/g, " ") : `Porta ${doors.length + 1}`,
+        });
+        break;
+      }
+      case "spawn": {
+        const [x, y] = (args.pos || "0,0").split(",").map(Number);
+        spawns.push({ x, y });
+        break;
+      }
+      case "event":
+        events.push(args);
+        break;
+      default:
+        // comando desconhecido - ignora (linguagem tolerante)
+        break;
+    }
+  }
+  return { roomName, doors, spawns, events };
+}
+
+function loadWorld() {
+  let source = "";
+  try {
+    source = fs.readFileSync(MAP_FILE, "utf8");
+  } catch {
+    source = "room name=Sala_Default\nspawn pos=400,300\n";
+  }
+  return parseDobloxScript(source);
+}
+
+const WORLD = loadWorld();
+console.log(`[DobloxScript] Mapa carregado: "${WORLD.roomName}" com ${WORLD.doors.length} portas.`);
+
+// ============================================================
+// 3) SERVIDOR HTTP (serve os ficheiros estáticos do public/)
+// ============================================================
+
+const MIME = {
+  ".html": "text/html; charset=utf-8",
+  ".css": "text/css; charset=utf-8",
+  ".js": "application/javascript; charset=utf-8",
+  ".json": "application/json; charset=utf-8",
+};
+
+const httpServer = http.createServer((req, res) => {
+  // --- API simples de login (POST /api/login) ---
+  if (req.method === "POST" && req.url === "/api/login") {
+    let body = "";
+    req.on("data", (chunk) => (body += chunk));
+    req.on("end", () => {
+      try {
+        const { username, password } = JSON.parse(body || "{}");
+        const result = registerOrLogin(username, password);
+        res.writeHead(result.ok ? 200 : 401, { "Content-Type": "application/json" });
+        res.end(JSON.stringify(result));
+      } catch {
+        res.writeHead(400, { "Content-Type": "application/json" });
+        res.end(JSON.stringify({ ok: false, error: "Pedido inválido." }));
+      }
+    });
+    return;
+  }
+
+  // --- ficheiros estáticos ---
+  let filePath = req.url === "/" ? "/index.html" : req.url;
+  filePath = filePath.split("?")[0];
+  const fullPath = path.join(PUBLIC_DIR, filePath);
+  if (!fullPath.startsWith(PUBLIC_DIR)) {
+    res.writeHead(403);
+    res.end("Proibido");
+    return;
+  }
+  fs.readFile(fullPath, (err, data) => {
+    if (err) {
+      res.writeHead(404, { "Content-Type": "text/plain" });
+      res.end("404 - não encontrado");
+      return;
+    }
+    const ext = path.extname(fullPath);
+    res.writeHead(200, { "Content-Type": MIME[ext] || "application/octet-stream" });
+    res.end(data);
+  });
+});
+
+// ============================================================
+// 4) SERVIDOR WEBSOCKET FEITO À MÃO (sem biblioteca "ws")
+//    Implementa o handshake e a framing mínima do protocolo
+//    WebSocket (RFC 6455) só com os módulos nativos do Node.
+// ============================================================
+
+const WS_MAGIC = "258EAFA5-E914-47DA-95CA-C5AB0DC85B11";
+const clients = new Map(); // socket -> player state
+
+function acceptWebSocket(req, socket) {
+  const key = req.headers["sec-websocket-key"];
+  const acceptKey = crypto
+    .createHash("sha1")
+    .update(key + WS_MAGIC)
+    .digest("base64");
+  socket.write(
+    "HTTP/1.1 101 Switching Protocols\r\n" +
+      "Upgrade: websocket\r\n" +
+      "Connection: Upgrade\r\n" +
+      `Sec-WebSocket-Accept: ${acceptKey}\r\n\r\n`
+  );
+}
+
+function encodeFrame(obj) {
+  const json = Buffer.from(JSON.stringify(obj));
+  const len = json.length;
+  let header;
+  if (len < 126) {
+    header = Buffer.from([0x81, len]);
+  } else if (len < 65536) {
+    header = Buffer.alloc(4);
+    header[0] = 0x81;
+    header[1] = 126;
+    header.writeUInt16BE(len, 2);
+  } else {
+    header = Buffer.alloc(10);
+    header[0] = 0x81;
+    header[1] = 127;
+    header.writeBigUInt64BE(BigInt(len), 2);
+  }
+  return Buffer.concat([header, json]);
+}
+
+function send(socket, obj) {
+  try {
+    socket.write(encodeFrame(obj));
+  } catch {
+    /* socket já fechado */
+  }
+}
+
+function broadcast(obj, exceptSocket) {
+  for (const sock of clients.keys()) {
+    if (sock !== exceptSocket) send(sock, obj);
+  }
+}
+
+// descodifica frames (incluindo fragmentação simples em buffer acumulado)
+function makeFrameReader(onMessage) {
+  let buffer = Buffer.alloc(0);
+  return function onData(chunk) {
+    buffer = Buffer.concat([buffer, chunk]);
+    while (buffer.length >= 2) {
+      const firstByte = buffer[0];
+      const opcode = firstByte & 0x0f;
+      const secondByte = buffer[1];
+      const masked = (secondByte & 0x80) !== 0;
+      let payloadLen = secondByte & 0x7f;
+      let offset = 2;
+
+      if (payloadLen === 126) {
+        if (buffer.length < offset + 2) return;
+        payloadLen = buffer.readUInt16BE(offset);
+        offset += 2;
+      } else if (payloadLen === 127) {
+        if (buffer.length < offset + 8) return;
+        payloadLen = Number(buffer.readBigUInt64BE(offset));
+        offset += 8;
+      }
+
+      let maskKey;
+      if (masked) {
+        if (buffer.length < offset + 4) return;
+        maskKey = buffer.slice(offset, offset + 4);
+        offset += 4;
+      }
+      if (buffer.length < offset + payloadLen) return; // ainda não chegou tudo
+
+      let payload = buffer.slice(offset, offset + payloadLen);
+      if (masked) {
+        const unmasked = Buffer.alloc(payload.length);
+        for (let i = 0; i < payload.length; i++) {
+          unmasked[i] = payload[i] ^ maskKey[i % 4];
+        }
+        payload = unmasked;
+      }
+
+      buffer = buffer.slice(offset + payloadLen);
+
+      if (opcode === 0x8) {
+        onMessage(null, true); // close frame
+      } else if (opcode === 0x1) {
+        try {
+          onMessage(JSON.parse(payload.toString("utf8")), false);
+        } catch {
+          /* ignora mensagens inválidas */
+        }
+      }
+      // ignora ping/pong (0x9/0xA) e outros opcodes para manter simples
+    }
+  };
+}
+
+// ============================================================
+// 5) ESTADO DO JOGO - jogadores, modos "Sombra Entre Nós" e
+//    "Portais Amaldiçoados"
+// ============================================================
+
+const game = {
+  mode: "lobby", // "lobby" | "sombra" | "portais"
+  round: null,
+};
+
+function randomSpawn() {
+  if (WORLD.spawns.length) {
+    const s = WORLD.spawns[Math.floor(Math.random() * WORLD.spawns.length)];
+    return { x: s.x, y: s.y };
+  }
+  return { x: 400 + Math.random() * 100, y: 300 + Math.random() * 100 };
+}
+
+function playerList() {
+  return [...clients.values()].map((p) => ({
+    id: p.id,
+    name: p.name,
+    x: p.x,
+    y: p.y,
+    color: p.color,
+    alive: p.alive,
+    role: game.mode === "sombra" ? p.role : null, // só revela papel no modo sombra
+  }));
+}
+
+function startSombra() {
+  const players = [...clients.values()];
+  if (players.length < 2) return false;
+  players.forEach((p) => {
+    p.alive = true;
+    p.role = "inocente";
+  });
+  const sombra = players[Math.floor(Math.random() * players.length)];
+  sombra.role = "sombra";
+  game.mode = "sombra";
+  game.round = { tasksDone: 0, tasksNeeded: players.length * 2, startedAt: Date.now() };
+  for (const p of players) {
+    send(p.socket, {
+      type: "modeStart",
+      mode: "sombra",
+      youAre: p.role,
+      message:
+        p.role === "sombra"
+          ? "Tu és a SOMBRA. Elimina os outros sem seres apanhado!"
+          : "Tu és INOCENTE. Faz tarefas e descobre quem é a Sombra!",
+    });
+  }
+  broadcast({ type: "players", players: playerList() });
+  return true;
+}
+
+function startPortais() {
+  const players = [...clients.values()];
+  if (players.length < 1) return false;
+  players.forEach((p) => {
+    p.alive = true;
+    p.doorIndex = 0;
+  });
+  game.mode = "portais";
+  game.round = { startedAt: Date.now(), doors: WORLD.doors };
+  broadcast({
+    type: "modeStart",
+    mode: "portais",
+    message: "Bem-vindo aos Portais Amaldiçoados. Escolhe bem as portas...",
+    doors: WORLD.doors.map((d) => ({ id: d.id, label: d.label, x: d.x, y: d.y })),
+  });
+  broadcast({ type: "players", players: playerList() });
+  return true;
+}
+
+function endRound(reason) {
+  game.mode = "lobby";
+  game.round = null;
+  broadcast({ type: "modeEnd", reason });
+  broadcast({ type: "players", players: playerList() });
+}
+
+// ============================================================
+// 6) LIGAÇÃO HTTP -> WEBSOCKET UPGRADE
+// ============================================================
+
+httpServer.on("upgrade", (req, socket) => {
+  if (req.headers["upgrade"] !== "websocket") {
+    socket.destroy();
+    return;
+  }
+  acceptWebSocket(req, socket);
+
+  const player = {
+    id: crypto.randomBytes(6).toString("hex"),
+    name: "Jogador",
+    x: 0,
+    y: 0,
+    color: `hsl(${Math.floor(Math.random() * 360)}, 70%, 55%)`,
+    alive: true,
+    role: "inocente",
+    doorIndex: 0,
+    socket,
+  };
+
+  const reader = makeFrameReader((msg, isClose) => {
+    if (isClose) {
+      socket.end();
+      return;
+    }
+    handleMessage(player, msg);
+  });
+
+  socket.on("data", reader);
+
+  socket.on("close", () => {
+    clients.delete(socket);
+    broadcast({ type: "playerLeft", id: player.id });
+    broadcast({ type: "players", players: playerList() });
+  });
+  socket.on("error", () => {
+    clients.delete(socket);
+  });
+
+  clients.set(socket, player);
+});
+
+function handleMessage(player, msg) {
+  if (!msg || typeof msg !== "object") return;
+
+  switch (msg.type) {
+    case "join": {
+      player.name = String(msg.name || "Jogador").slice(0, 16);
+      const spawn = randomSpawn();
+      player.x = spawn.x;
+      player.y = spawn.y;
+      send(player.socket, {
+        type: "welcome",
+        id: player.id,
+        room: WORLD.roomName,
+        mode: game.mode,
+        doors: WORLD.doors.map((d) => ({ id: d.id, label: d.label, x: d.x, y: d.y })),
+      });
+      broadcast({ type: "players", players: playerList() });
+      broadcast(
+        { type: "chat", from: "Servidor", text: `${player.name} entrou no jogo.` },
+        null
+      );
+      break;
+    }
+
+    case "move": {
+      if (!player.alive) return;
+      // movimento simples, confiamos no cliente para esta escala (jogo privado entre amigos)
+      const speed = 6;
+      if (msg.dx) player.x += Math.sign(msg.dx) * speed;
+      if (msg.dy) player.y += Math.sign(msg.dy) * speed;
+      player.x = Math.max(0, Math.min(1000, player.x));
+      player.y = Math.max(0, Math.min(600, player.y));
+      broadcast({ type: "move", id: player.id, x: player.x, y: player.y }, player.socket);
+      break;
+    }
+
+    case "chat": {
+      const text = String(msg.text || "").slice(0, 200);
+      if (!text.trim()) return;
+      broadcast({ type: "chat", from: player.name, text });
+      break;
+    }
+
+    case "startMode": {
+      if (game.mode !== "lobby") return;
+      if (msg.mode === "sombra") startSombra();
+      else if (msg.mode === "portais") startPortais();
+      break;
+    }
+
+    case "eliminate": {
+      // modo "Sombra Entre Nós": a sombra elimina um jogador perto
+      if (game.mode !== "sombra" || player.role !== "sombra" || !player.alive) return;
+      const target = [...clients.values()].find((p) => p.id === msg.targetId);
+      if (!target || !target.alive) return;
+      const dist = Math.hypot(target.x - player.x, target.y - player.y);
+      if (dist < 40) {
+        target.alive = false;
+        broadcast({ type: "eliminated", id: target.id });
+        broadcast({ type: "chat", from: "Servidor", text: `${target.name} foi eliminado!` });
+        checkSombraWin();
+      }
+      break;
+    }
+
+    case "doTask": {
+      if (game.mode !== "sombra" || player.role !== "inocente" || !player.alive) return;
+      game.round.tasksDone++;
+      broadcast({
+        type: "tasks",
+        done: game.round.tasksDone,
+        needed: game.round.tasksNeeded,
+      });
+      checkSombraWin();
+      break;
+    }
+
+    case "useDoor": {
+      if (game.mode !== "portais" || !player.alive) return;
+      const door = WORLD.doors[player.doorIndex];
+      if (!door || door.id !== msg.doorId) return;
+      const isTrap = door.trap && Math.random() < door.chance;
+      if (isTrap) {
+        player.alive = false;
+        send(player.socket, { type: "doorResult", survived: false, doorId: door.id });
+        broadcast({ type: "eliminated", id: player.id });
+        broadcast({ type: "chat", from: "Servidor", text: `${player.name} morreu em ${door.label}!` });
+      } else {
+        player.doorIndex++;
+        const finished = player.doorIndex >= WORLD.doors.length;
+        send(player.socket, {
+          type: "doorResult",
+          survived: true,
+          doorId: door.id,
+          finished,
+          nextDoor: finished ? null : WORLD.doors[player.doorIndex].id,
+        });
+        if (finished) {
+          broadcast({ type: "chat", from: "Servidor", text: `${player.name} completou os Portais Amaldiçoados! 🏆` });
+        }
+      }
+      break;
+    }
+
+    case "endMode": {
+      endRound("terminado manualmente");
+      break;
+    }
+  }
+}
+
+function checkSombraWin() {
+  const players = [...clients.values()];
+  const alive = players.filter((p) => p.alive);
+  const sombraAlive = alive.some((p) => p.role === "sombra");
+  if (!sombraAlive) {
+    endRound("Os inocentes venceram! A Sombra foi eliminada.");
+    return;
+  }
+  if (alive.length <= 2 && sombraAlive) {
+    endRound("A Sombra venceu! Só restam a Sombra e mais um.");
+    return;
+  }
+  if (game.round && game.round.tasksDone >= game.round.tasksNeeded) {
+    endRound("Os inocentes venceram! Todas as tarefas foram feitas.");
+  }
+}
+
+httpServer.listen(PORT, () => {
+  console.log(`\n==============================================`);
+  console.log(`  DOBLOX a correr em http://localhost:${PORT}`);
+  console.log(`  Partilha o teu IP local com os teus amigos`);
+  console.log(`  para jogarem na mesma rede.`);
+  console.log(`==============================================\n`);
+});
