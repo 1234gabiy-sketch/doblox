@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="pt-PT">
+<head>
+    <meta charset="UTF-8">
+    <title>DOBLOX - Poder à Imaginação (e ao Copy-Paste)</title>
+    <link rel="stylesheet" href="style.css">
+    <!-- Biblioteca mágica para Multiplayer grátis no GitHub -->
+    <script src="https://unpkg.com/peerjs@1.5.2/dist/peerjs.min.js"></script>
+</head>
+<body>
+
+    <!-- ECRÃ DE LOGIN -->
+    <div id="login-screen" class="screen active">
+        <div class="box">
+            <h1 class="logo">DOBLOX</h1>
+            <p class="subtitle">Melhor que o original porque não crasha o PC</p>
+            <input type="text" id="username-input" placeholder="Mete o teu nick épico..." maxlength="15">
+            <input type="password" id="password-input" placeholder="Senha ultra secreta (1234)">
+            <button onclick="login()">ENTRAR NO METAVERSO</button>
+            <p id="login-error" class="error"></p>
+        </div>
+    </div>
+
+    <!-- LOBBY PRINCIPAL -->
+    <div id="lobby-screen" class="screen">
+        <header>
+            <div class="logo-small">DOBLOX</div>
+            <div class="user-info">
+                <span id="display-user">Noob</span> | 
+                <span class="dobux">D$ <span id="dobux-count">9999</span></span>
+                <button class="btn-studio" onclick="openStudio()">🛠️ DOBLOX STUDIO</button>
+                <button class="btn-logout" onclick="logout()">Sair</button>
+            </div>
+        </header>
+
+        <main class="games-grid">
+            <div class="game-card" onclick="selectGame('hd2')">
+                <div class="thumb hd2-thumb">🔪</div>
+                <h3>Homicide Distery 2</h3>
+                <p>Um gajo tem uma faca, outro uma pistola, e o resto corre feito barata tonta.</p>
+                <span class="players-tag">🟢 69.420 a jogar</span>
+            </div>
+
+            <div class="game-card" onclick="selectGame('poors')">
+                <div class="thumb poors-thumb">🚪</div>
+                <h3>POORS!DO</h3>
+                <p>Abre portas no escuro até um bicho preto te dar um susto de morte.</p>
+                <span class="players-tag">🟢 42.069 a jogar</span>
+            </div>
+        </main>
+
+        <!-- PAINEL MULTIPLAYER -->
+        <div id="multiplayer-modal" class="modal hidden">
+            <div class="box">
+                <h2 id="selected-game-title">Jogo</h2>
+                <p>O teu ID de Servidor: <b id="my-peer-id">A gerar...</b></p>
+                <button onclick="hostGame()">👑 CRIAR SERVIDOR (SER HOST)</button>
+                <hr>
+                <input type="text" id="join-id-input" placeholder="Cola o ID do teu amigo aqui...">
+                <button onclick="joinGame()">🚀 ENTRAR NO SERVIDOR</button>
+                <button class="btn-cancel" onclick="closeModal()">Cancelar</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- ECRÃ DE JOGO (2D TOP-DOWN) -->
+    <div id="game-screen" class="screen">
+        <div class="game-hud">
+            <span id="hud-game-name">Jogo</span> | 
+            <span id="hud-role">Papel: A carregar...</span> | 
+            <span id="hud-status">Estado: Vivo</span>
+            <button onclick="leaveGame()">Sair do Jogo</button>
+        </div>
+        <canvas id="gameCanvas" width="800" height="500"></canvas>
+        <div class="controls-hint">Usa <b>W A S D</b> ou <b>Setas</b> para andar | <b>ESPAÇO</b> para usar habilidade/interagir</div>
+    </div>
+
+    <!-- DOBLOX STUDIO -->
+    <div id="studio-screen" class="screen">
+        <header>
+            <div class="logo-small">DOBLOX STUDIO <span style="font-size:12px;color:#0f0;">(Linguagem DUAU v1.0)</span></div>
+            <div>
+                <button class="btn-play-studio" onclick="runDuauCode()">▶️ EXECUTAR CÓDIGO DUAU</button>
+                <button onclick="testCustomMap()">🎮 TESTAR MAPA</button>
+                <button class="btn-logout" onclick="closeStudio()">Voltar ao Lobby</button>
+            </div>
+        </header>
+        <div class="studio-workspace">
+            <div class="studio-canvas-area">
+                <p>Clica no mapa para meter paredes (Blocos):</p>
+                <canvas id="studioCanvas" width="500" height="400"></canvas>
+                <button onclick="clearStudioMap()">Limpar Blocos</button>
+            </div>
+            <div class="studio-code-area">
+                <h3>Editor de Scripts (DUAU)</h3>
+                <textarea id="duau-editor" spellcheck="false">-- Bem-vindo ao DUAU! Escreve o teu código abaixo:
+falar("O Doblox é melhor que o Roblox!")
+cor_jogador("#00ffcc")
+velocidade(6)
+criar_bloco(200, 200, "red")
+dar_dobux(500)</textarea>
+                <div id="duau-console" class="console-box">Consola DUAU pronta...</div>
+            </div>
+        </div>
+    </div>
+
+    <!-- OS OUTROS FICHEIROS JS -->
+    <script src="duau.js"></script>
+    <script src="network.js"></script>
+    <script src="games.js"></script>
+    <script src="main.js"></script>
+</body>
+</html>
